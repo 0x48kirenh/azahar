@@ -5,6 +5,9 @@
 
 #pragma once
 
+#include <atomic>
+#include <mutex>
+
 #include "common/archives.h"
 #include "common/microprofile.h"
 #include "core/core.h"
@@ -35,6 +38,8 @@ struct GPU::Impl {
     std::unique_ptr<SwRenderer::SwBlitter> sw_blitter;
     Core::TimingEventType* vblank_event;
     Service::GSP::InterruptHandler signal_interrupt;
+    std::atomic_bool frame_ready{false};
+    std::mutex reg_mutex;
 
     explicit Impl(Core::System& system, Frontend::EmuWindow& emu_window,
                   Frontend::EmuWindow* secondary_window)

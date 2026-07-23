@@ -24,6 +24,9 @@ SERIALIZE_EXPORT_IMPL(Kernel::New3dsHwCapabilities)
 
 namespace Kernel {
 
+static thread_local Core::ARM_Interface* tls_current_cpu = nullptr;
+static thread_local std::shared_ptr<Process> tls_current_process;
+
 /// Initialize the kernel
 KernelSystem::KernelSystem(Memory::MemorySystem& memory, Core::Timing& timing,
                            std::function<void()> prepare_reschedule_callback,
@@ -42,6 +45,7 @@ KernelSystem::KernelSystem(Memory::MemorySystem& memory, Core::Timing& timing,
     timer_manager = std::make_unique<TimerManager>(timing);
     ipc_recorder = std::make_unique<IPCDebugger::Recorder>();
     stored_processes.assign(num_cores, nullptr);
+    reschedule_pending.assign(num_cores, false);
 
     next_thread_id = 1;
 }
@@ -64,28 +68,38 @@ u32 KernelSystem::GenerateObjectID() {
 }
 
 std::shared_ptr<Process> KernelSystem::GetCurrentProcess() const {
-    return current_process;
+    return tls_current_process ? tls_current_process : current_process;
 }
 
 void KernelSystem::SetCurrentProcess(std::shared_ptr<Process> process) {
+    tls_current_process = process;
     current_process = process;
     SetCurrentMemoryPageTable(process->vm_manager.page_table);
 }
 
 void KernelSystem::SetCurrentProcessForCPU(std::shared_ptr<Process> process, u32 core_id) {
-    if (current_cpu->GetID() == core_id) {
+    stored_processes[core_id] = process;
+    thread_managers[core_id]->cpu->SetPageTable(process->vm_manager.page_table);
+    Memory::MemorySystem::SetTlsPageTable(process->vm_manager.page_table);
+    tls_current_process = process;
+    auto* cpu = tls_current_cpu ? tls_current_cpu : current_cpu;
+    if (cpu->GetID() == core_id) {
         current_process = process;
-        SetCurrentMemoryPageTable(process->vm_manager.page_table);
-    } else {
-        stored_processes[core_id] = process;
-        thread_managers[core_id]->cpu->SetPageTable(process->vm_manager.page_table);
+        memory.SetCurrentPageTable(process->vm_manager.page_table);
     }
+}
+
+void KernelSystem::ClearCurrentProcessTLS() {
+    tls_current_process = nullptr;
+    tls_current_cpu = nullptr;
 }
 
 void KernelSystem::SetCurrentMemoryPageTable(std::shared_ptr<Memory::PageTable> page_table) {
     memory.SetCurrentPageTable(page_table);
-    if (current_cpu != nullptr) {
-        current_cpu->SetPageTable(page_table);
+    Memory::MemorySystem::SetTlsPageTable(page_table);
+    auto* cpu = tls_current_cpu ? tls_current_cpu : current_cpu;
+    if (cpu != nullptr) {
+        cpu->SetPageTable(page_table);
     }
 }
 
@@ -97,13 +111,27 @@ void KernelSystem::SetCPUs(std::vector<std::shared_ptr<Core::ARM_Interface>> cpu
 }
 
 void KernelSystem::SetRunningCPU(Core::ARM_Interface* cpu) {
-    if (current_process) {
-        stored_processes[current_cpu->GetID()] = current_process;
+    Core::ARM_Interface* old_cpu = tls_current_cpu;
+    if (old_cpu && current_process) {
+        stored_processes[old_cpu->GetID()] = current_process;
     }
+    tls_current_cpu = cpu;
     current_cpu = cpu;
     timing.SetCurrentTimer(cpu->GetID());
-    if (stored_processes[current_cpu->GetID()]) {
-        SetCurrentProcess(stored_processes[current_cpu->GetID()]);
+    if (stored_processes[cpu->GetID()]) {
+        SetCurrentProcess(stored_processes[cpu->GetID()]);
+    }
+}
+
+Core::ARM_Interface* KernelSystem::GetRunningCPU() const {
+    return tls_current_cpu ? tls_current_cpu : current_cpu;
+}
+
+void KernelSystem::PrepareReschedule() {
+    auto* cpu = GetRunningCPU();
+    if (cpu) {
+        reschedule_pending[cpu->GetID()] = true;
+        cpu->PrepareReschedule();
     }
 }
 
@@ -116,11 +144,13 @@ const ThreadManager& KernelSystem::GetThreadManager(u32 core_id) const {
 }
 
 ThreadManager& KernelSystem::GetCurrentThreadManager() {
-    return *thread_managers[current_cpu->GetID()];
+    auto* cpu = tls_current_cpu ? tls_current_cpu : current_cpu;
+    return *thread_managers[cpu->GetID()];
 }
 
 const ThreadManager& KernelSystem::GetCurrentThreadManager() const {
-    return *thread_managers[current_cpu->GetID()];
+    auto* cpu = tls_current_cpu ? tls_current_cpu : current_cpu;
+    return *thread_managers[cpu->GetID()];
 }
 
 TimerManager& KernelSystem::GetTimerManager() {
@@ -160,6 +190,7 @@ void KernelSystem::RestoreIPCRecorder(std::unique_ptr<IPCDebugger::Recorder> rec
 }
 
 void KernelSystem::AddNamedPort(std::string name, std::shared_ptr<ClientPort> port) {
+    std::unique_lock lock{named_ports_mutex};
     named_ports.emplace(std::move(name), std::move(port));
 }
 

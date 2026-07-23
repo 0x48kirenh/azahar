@@ -198,7 +198,11 @@ public:
 
     CpuLimiter* GetCpuLimiter() {
         return (current_schedule_mode == Core1ScheduleMode::Single) ? &single_time_limiter
-                                                                    : &multi_time_limiter;
+                                                                     : &multi_time_limiter;
+    }
+
+    std::mutex& GetCrossCoreMutex() {
+        return cross_core_mutex;
     }
 
 private:
@@ -238,6 +242,8 @@ private:
     Core1ScheduleMode current_schedule_mode{};
     CpuLimiterSingle single_time_limiter;
     CpuLimiterMulti multi_time_limiter;
+
+    std::mutex cross_core_mutex;
 
     friend class Thread;
     friend class KernelSystem;

@@ -32,6 +32,8 @@ class EmuWindow;
 
 namespace VideoCore {
 
+class GpuCommandThread;
+
 /// Measured on hardware to be 2240568 timer cycles or 4481136 ARM11 cycles
 constexpr u64 FRAME_TICKS = 4481136ull;
 
@@ -99,6 +101,22 @@ public:
     /// Releases the renderer (for GL context destroy in libretro)
     void ReleaseRenderer();
 
+    void StartGpuThread();
+
+    void StopGpuThread();
+
+    [[nodiscard]] bool IsFrameReady() const;
+
+    void ClearFrameReady();
+
+    void ExecuteSync(const Service::GSP::Command& command);
+
+    void MemoryFillSync(u32 index, u32 intr_index);
+
+    void MemoryTransferSync();
+
+    void SubmitCmdListSync(u32 index);
+
 private:
     void SubmitCmdList(u32 index);
 
@@ -113,7 +131,11 @@ private:
     template <class Archive>
     void serialize(Archive& ar, const u32 file_version);
 
+    friend class GpuCommandThread;
+
     std::unique_ptr<RightEyeDisabler> right_eye_disabler;
+
+    std::unique_ptr<GpuCommandThread> gpu_command_thread;
 
 private:
     friend class RightEyeDisabler;

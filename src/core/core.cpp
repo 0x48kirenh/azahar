@@ -23,6 +23,10 @@
 #include "core/cheats/cheats.h"
 #include "core/core.h"
 #include "core/core_timing.h"
+#include "core/cross_core_svc.h"
+#include "core/interrupt_controller.h"
+#include "core/jit_cache_coherence.h"
+#include "core/emulation_orchestrator.h"
 #include "core/dumping/backend.h"
 #include "core/file_sys/ncch_container.h"
 #include "core/frontend/image_interface.h"
@@ -80,10 +84,15 @@ System::System() : movie{*this}, cheat_engine{*this} {}
 System::~System() = default;
 
 System::ResultStatus System::RunLoop(bool tight_loop) {
-    status = ResultStatus::Success;
     if (!IsPoweredOn()) {
         return ResultStatus::ErrorNotInitialized;
     }
+
+    if (tight_loop) {
+        return emulation_orchestrator->RunFrame();
+    }
+
+    status = ResultStatus::Success;
 
 #ifdef ENABLE_GDBSTUB
     if (GDBStub::IsServerEnabled()) {
@@ -475,8 +484,7 @@ System::ResultStatus System::Load(Frontend::EmuWindow& emu_window, const std::st
 }
 
 void System::PrepareReschedule() {
-    running_core->PrepareReschedule();
-    reschedule_pending = true;
+    kernel->PrepareReschedule();
 }
 
 PerfStats::Results System::GetAndResetPerfStats() {
@@ -493,11 +501,6 @@ double System::GetStableFrameTimeScale() {
 }
 
 void System::Reschedule() {
-    if (!reschedule_pending) {
-        return;
-    }
-
-    reschedule_pending = false;
     for (const auto& core : cpu_cores) {
         LOG_TRACE(Core_ARM11, "Reschedule core {}", core->GetID());
         kernel->GetThreadManager(core->GetID()).Reschedule();
@@ -519,6 +522,10 @@ System::ResultStatus System::Init(Frontend::EmuWindow& emu_window,
         movie.GetOverrideInitTime());
 
     exclusive_monitor = MakeExclusiveMonitor(*memory, num_cores);
+    interrupt_controller = std::make_unique<Core::InterruptController>();
+    cross_core_svc = std::make_unique<Core::CrossCoreSVC>();
+    jit_cache_coherence = std::make_unique<Core::JitCacheCoherence>();
+    emulation_orchestrator = std::make_unique<Core::EmulationOrchestrator>(*this);
     cpu_cores.reserve(num_cores);
     if (Settings::values.use_cpu_jit) {
 #if CITRA_ARCH(x86_64) || CITRA_ARCH(arm64)
@@ -640,6 +647,18 @@ const Timing& System::CoreTiming() const {
     return *timing;
 }
 
+InterruptController& System::InterruptCtrl() {
+    return *interrupt_controller;
+}
+
+CrossCoreSVC& System::CrossCore() {
+    return *cross_core_svc;
+}
+
+JitCacheCoherence& System::JitCoherence() {
+    return *jit_cache_coherence;
+}
+
 Memory::MemorySystem& System::Memory() {
     return *memory;
 }
@@ -693,7 +712,13 @@ void System::Shutdown(bool is_deserializing) {
     // Shutdown emulation session
     is_powered_on = false;
 
+    emulation_orchestrator.reset();
     gpu.reset();
+
+    if (kernel) {
+        kernel->ClearStoredProcesses();
+        kernel->ClearCurrentProcessTLS();
+    }
     if (!is_deserializing) {
         lle_modules.clear();
 #ifdef ENABLE_GDBSTUB
@@ -710,6 +735,9 @@ void System::Shutdown(bool is_deserializing) {
     service_manager.reset();
     dsp_core.reset();
     kernel.reset();
+    cross_core_svc.reset();
+    interrupt_controller.reset();
+    jit_cache_coherence.reset();
     cpu_cores.clear();
     exclusive_monitor.reset();
     timing.reset();

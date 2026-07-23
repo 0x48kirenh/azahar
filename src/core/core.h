@@ -76,6 +76,10 @@ namespace Core {
 class ARM_Interface;
 class ExclusiveMonitor;
 class Timing;
+class InterruptController;
+class CrossCoreSVC;
+class JitCacheCoherence;
+class EmulationOrchestrator;
 
 class System {
 public:
@@ -269,6 +273,15 @@ public:
 
     /// Gets a const reference to the timing system
     [[nodiscard]] const Timing& CoreTiming() const;
+
+    /// Gets a reference to the interrupt controller
+    [[nodiscard]] InterruptController& InterruptCtrl();
+
+    /// Gets a reference to the cross-core SVC handler
+    [[nodiscard]] CrossCoreSVC& CrossCore();
+
+    /// Gets a reference to the JIT cache coherence manager
+    [[nodiscard]] JitCacheCoherence& JitCoherence();
 
     /// Gets a reference to the memory system
     [[nodiscard]] Memory::MemorySystem& Memory();
@@ -496,6 +509,12 @@ private:
 
     std::unique_ptr<Core::ExclusiveMonitor> exclusive_monitor;
 
+    std::unique_ptr<Core::InterruptController> interrupt_controller;
+    std::unique_ptr<Core::CrossCoreSVC> cross_core_svc;
+    std::unique_ptr<Core::JitCacheCoherence> jit_cache_coherence;
+
+    std::unique_ptr<Core::EmulationOrchestrator> emulation_orchestrator;
+
 private:
     static System s_instance;
 
@@ -538,6 +557,7 @@ private:
     int override_gdb_port = -1;
 
     friend class boost::serialization::access;
+    friend class EmulationOrchestrator;
     template <typename Archive>
     void serialize(Archive& ar, const unsigned int file_version);
 };

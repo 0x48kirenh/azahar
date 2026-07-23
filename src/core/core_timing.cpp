@@ -12,6 +12,8 @@
 
 namespace Core {
 
+static thread_local Timing::Timer* tls_current_timer = nullptr;
+
 // Sort by time, unless the times are the same, in which case sort by the order added to the queue
 bool Timing::Event::operator>(const Timing::Event& right) const {
     return std::tie(time, fifo_order) > std::tie(right.time, right.fifo_order);
@@ -70,7 +72,7 @@ void Timing::ScheduleEvent(s64 cycles_into_future, const TimingEventType* event_
     ASSERT(event_type != nullptr);
     Timing::Timer* timer = nullptr;
     if (core_id == std::numeric_limits<std::size_t>::max()) {
-        timer = current_timer;
+        timer = tls_current_timer ? tls_current_timer : current_timer;
     } else {
         ASSERT(core_id < timers.size());
         timer = timers.at(core_id).get();
@@ -87,8 +89,7 @@ void Timing::ScheduleEvent(s64 cycles_into_future, const TimingEventType* event_
                                    user_data, event_type});
     } else {
         s64 timeout = timer->GetTicks() + cycles_into_future;
-        if (current_timer == timer) {
-            // If this event needs to be scheduled before the next advance(), force one early
+        if (tls_current_timer == timer || current_timer == timer) {
             if (!timer->is_timer_sane)
                 timer->ForceExceptionCheck(cycles_into_future);
 
@@ -106,43 +107,52 @@ void Timing::UnscheduleEvent(const TimingEventType* event_type, std::uintptr_t u
     if (event_queue_locked) {
         return;
     }
+    if (!event_type) {
+        return;
+    }
     for (auto timer : timers) {
+        if (!timer) {
+            continue;
+        }
         auto itr = std::remove_if(
             timer->event_queue.begin(), timer->event_queue.end(),
             [&](const Event& e) { return e.type == event_type && e.user_data == user_data; });
 
-        // Removing random items breaks the invariant so we have to re-establish it.
         if (itr != timer->event_queue.end()) {
             timer->event_queue.erase(itr, timer->event_queue.end());
             std::make_heap(timer->event_queue.begin(), timer->event_queue.end(), std::greater<>());
         }
     }
-    // TODO:remove events from ts_queue
 }
 
 void Timing::RemoveEvent(const TimingEventType* event_type) {
     if (event_queue_locked) {
         return;
     }
+    if (!event_type) {
+        return;
+    }
     for (auto timer : timers) {
+        if (!timer) {
+            continue;
+        }
         auto itr = std::remove_if(timer->event_queue.begin(), timer->event_queue.end(),
                                   [&](const Event& e) { return e.type == event_type; });
 
-        // Removing random items breaks the invariant so we have to re-establish it.
         if (itr != timer->event_queue.end()) {
             timer->event_queue.erase(itr, timer->event_queue.end());
             std::make_heap(timer->event_queue.begin(), timer->event_queue.end(), std::greater<>());
         }
     }
-    // TODO:remove events from ts_queue
 }
 
 void Timing::SetCurrentTimer(std::size_t core_id) {
     current_timer = timers[core_id].get();
+    tls_current_timer = current_timer;
 }
 
 s64 Timing::GetTicks() const {
-    return current_timer->GetTicks();
+    return (tls_current_timer ? tls_current_timer : current_timer)->GetTicks();
 }
 
 s64 Timing::GetGlobalTicks() const {

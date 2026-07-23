@@ -13,6 +13,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <span>
 #include <string>
 #include <unordered_map>
@@ -326,6 +327,8 @@ public:
 
     void SetRunningCPU(Core::ARM_Interface* cpu);
 
+    [[nodiscard]] Core::ARM_Interface* GetRunningCPU() const;
+
     ThreadManager& GetThreadManager(u32 core_id);
     const ThreadManager& GetThreadManager(u32 core_id) const;
 
@@ -356,8 +359,12 @@ public:
     /// Adds a port to the named port table
     void AddNamedPort(std::string name, std::shared_ptr<ClientPort> port);
 
-    void PrepareReschedule() {
-        prepare_reschedule_callback();
+    void PrepareReschedule();
+
+    bool ConsumeReschedulePending(u32 core_id) {
+        bool val = reschedule_pending[core_id];
+        reschedule_pending[core_id] = false;
+        return val;
     }
 
     u32 NewThreadId();
@@ -382,6 +389,7 @@ public:
 
     /// Map of named ports managed by the kernel, which can be retrieved using the ConnectToPort
     std::unordered_map<std::string, std::shared_ptr<ClientPort>> named_ports;
+    std::shared_mutex named_ports_mutex;
 
     Core::ARM_Interface* current_cpu = nullptr;
 
@@ -397,6 +405,12 @@ public:
     bool GetAppMainThreadExtendedSleep() const {
         return main_thread_extended_sleep;
     }
+
+    void ClearStoredProcesses() {
+        stored_processes.assign(stored_processes.size(), nullptr);
+    }
+
+    void ClearCurrentProcessTLS();
 
     void ReportAsyncState(bool state) {
         if (state) {
@@ -450,6 +464,7 @@ private:
 
     std::shared_ptr<Process> current_process;
     std::vector<std::shared_ptr<Process>> stored_processes;
+    std::vector<bool> reschedule_pending;
 
     std::vector<std::unique_ptr<ThreadManager>> thread_managers;
 

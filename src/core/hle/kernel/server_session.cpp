@@ -96,12 +96,12 @@ Result ServerSession::HandleSyncRequest(std::shared_ptr<Thread> thread) {
 
         hle_handler->HandleSyncRequest(*context);
 
-        ASSERT(thread->status == Kernel::ThreadStatus::Running ||
-               thread->status == Kernel::ThreadStatus::WaitHleEvent);
-        // Only write the response immediately if the thread is still running. If the HLE handler
-        // put the thread to sleep then the writing of the command buffer will be deferred to the
-        // wakeup callback.
-        if (thread->status == Kernel::ThreadStatus::Running) {
+        ASSERT_MSG(thread->status == Kernel::ThreadStatus::Running ||
+                   thread->status == Kernel::ThreadStatus::WaitHleEvent ||
+                   thread->status == Kernel::ThreadStatus::WaitIPC,
+                   "thread->status={}, thread={}", static_cast<int>(thread->status),
+                   thread->GetName());
+        if (thread->status == ThreadStatus::Running) {
             context->WriteToOutgoingCommandBuffer(cmd_buf.data(), *current_process);
             kernel.memory.WriteBlock(*current_process, thread->GetCommandBufferAddress(),
                                      cmd_buf.data(), cmd_buf.size() * sizeof(u32));
@@ -109,8 +109,6 @@ Result ServerSession::HandleSyncRequest(std::shared_ptr<Thread> thread) {
     }
 
     if (thread->status == ThreadStatus::Running) {
-        // Put the thread to sleep until the server replies, it will be awoken in
-        // svcReplyAndReceive for LLE servers.
         thread->status = ThreadStatus::WaitIPC;
 
         if (hle_handler != nullptr) {

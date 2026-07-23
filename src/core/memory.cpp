@@ -3,6 +3,7 @@
 // Refer to the license.txt file included.
 
 #include <array>
+#include <atomic>
 #include <csignal>
 #include <cstring>
 #include <boost/serialization/array.hpp>
@@ -25,6 +26,7 @@
 #include "core/hle/kernel/process.h"
 #include "core/hle/service/plgldr/plgldr.h"
 #include "core/memory.h"
+#include "core/memory_page_lock.h"
 #include "video_core/gpu.h"
 #include "video_core/renderer_base.h"
 
@@ -53,14 +55,15 @@ class RasterizerCacheMarker {
 public:
     void Mark(VAddr addr, bool cached) {
         bool* p = At(addr);
-        if (p)
-            *p = cached;
+        if (p) {
+            std::atomic_ref{*p}.store(cached, std::memory_order_release);
+        }
     }
 
     bool IsCached(VAddr addr) {
         bool* p = At(addr);
         if (p)
-            return *p;
+            return std::atomic_ref{*p}.load(std::memory_order_acquire);
         return false;
     }
 
@@ -110,6 +113,7 @@ public:
     std::shared_ptr<PageTable> current_page_table = nullptr;
     RasterizerCacheMarker cache_marker;
     std::vector<std::shared_ptr<PageTable>> page_table_list;
+    PageLock page_lock;
 
     std::shared_ptr<BackingMem> fcram_mem;
     std::shared_ptr<BackingMem> vram_mem;
@@ -401,6 +405,27 @@ MemorySystem::Impl::Impl(Core::System& system_)
 
 MemorySystem::MemorySystem(Core::System& system) : impl(std::make_unique<Impl>(system)) {}
 MemorySystem::~MemorySystem() = default;
+
+PageLock& MemorySystem::GetPageLock() {
+    return impl->page_lock;
+}
+
+static thread_local std::shared_ptr<PageTable> tls_page_table;
+
+void MemorySystem::SetTlsPageTable(std::shared_ptr<PageTable> page_table) {
+    tls_page_table = std::move(page_table);
+}
+
+std::shared_ptr<PageTable> MemorySystem::GetTlsPageTable() {
+    return tls_page_table;
+}
+
+static std::shared_ptr<PageTable> GetEffectivePageTable() {
+    if (tls_page_table) {
+        return tls_page_table;
+    }
+    return Core::Global<Core::System>().Memory().GetCurrentPageTable();
+}
 
 template <class Archive>
 void MemorySystem::serialize(Archive& ar, const unsigned int file_version) {
@@ -762,7 +787,8 @@ void MemorySystem::Write(const std::shared_ptr<PageTable>& page_table, const VAd
 
 template <typename T>
 bool MemorySystem::WriteExclusive(const VAddr vaddr, const T data, const T expected) {
-    u8* page_pointer = impl->current_page_table->pointers[vaddr >> CITRA_PAGE_BITS];
+    auto page_table = GetEffectivePageTable();
+    u8* page_pointer = page_table->pointers[vaddr >> CITRA_PAGE_BITS];
 
     if (page_pointer) {
         const auto volatile_pointer =
@@ -770,7 +796,7 @@ bool MemorySystem::WriteExclusive(const VAddr vaddr, const T data, const T expec
         return Common::AtomicCompareAndSwap(volatile_pointer, data, expected);
     }
 
-    PageType type = impl->current_page_table->attributes[vaddr >> CITRA_PAGE_BITS];
+    PageType type = page_table->attributes[vaddr >> CITRA_PAGE_BITS];
     switch (type) {
     case PageType::Unmapped:
         (void)UnmappedAccess<T>(vaddr, data, false);
@@ -779,8 +805,8 @@ bool MemorySystem::WriteExclusive(const VAddr vaddr, const T data, const T expec
         ASSERT_MSG(false, "Mapped memory page without a pointer @ {:08X}", vaddr);
         return true;
     case PageType::MemoryWatchpoint: {
-        auto it = impl->current_page_table->watchpoint_pages_map.find(vaddr >> CITRA_PAGE_BITS);
-        ASSERT_MSG(it != impl->current_page_table->watchpoint_pages_map.end(),
+        auto it = page_table->watchpoint_pages_map.find(vaddr >> CITRA_PAGE_BITS);
+        ASSERT_MSG(it != page_table->watchpoint_pages_map.end(),
                    "Missing memory for watchpoint page");
 
         const auto volatile_pointer =
@@ -841,14 +867,15 @@ bool MemorySystem::IsValidPhysicalAddress(const PAddr paddr) {
 }
 
 u8* MemorySystem::GetPointer(const VAddr vaddr) {
-    u8* page_pointer = impl->current_page_table->pointers[vaddr >> CITRA_PAGE_BITS];
+    auto page_table = GetEffectivePageTable();
+    u8* page_pointer = page_table->pointers[vaddr >> CITRA_PAGE_BITS];
     if (page_pointer) {
         return page_pointer + (vaddr & CITRA_PAGE_MASK);
     }
 
-    if (impl->current_page_table->attributes[vaddr >> CITRA_PAGE_BITS] ==
+    if (page_table->attributes[vaddr >> CITRA_PAGE_BITS] ==
             PageType::RasterizerCachedMemory ||
-        impl->current_page_table->attributes[vaddr >> CITRA_PAGE_BITS] ==
+        page_table->attributes[vaddr >> CITRA_PAGE_BITS] ==
             PageType::RasterizerCachedMemoryWatchpoint) {
         return GetPointerForRasterizerCache(vaddr);
     }
@@ -858,14 +885,15 @@ u8* MemorySystem::GetPointer(const VAddr vaddr) {
 }
 
 const u8* MemorySystem::GetPointer(const VAddr vaddr) const {
-    const u8* page_pointer = impl->current_page_table->pointers[vaddr >> CITRA_PAGE_BITS];
+    auto page_table = GetEffectivePageTable();
+    const u8* page_pointer = page_table->pointers[vaddr >> CITRA_PAGE_BITS];
     if (page_pointer) {
         return page_pointer + (vaddr & CITRA_PAGE_MASK);
     }
 
-    if (impl->current_page_table->attributes[vaddr >> CITRA_PAGE_BITS] ==
+    if (page_table->attributes[vaddr >> CITRA_PAGE_BITS] ==
             PageType::RasterizerCachedMemory ||
-        impl->current_page_table->attributes[vaddr >> CITRA_PAGE_BITS] ==
+        page_table->attributes[vaddr >> CITRA_PAGE_BITS] ==
             PageType::RasterizerCachedMemoryWatchpoint) {
         return GetPointerForRasterizerCache(vaddr);
     }
@@ -1044,7 +1072,7 @@ void MemorySystem::RasterizerMarkRegionCached(PAddr start, u32 size, bool cached
 }
 
 u8 MemorySystem::Read8(const VAddr addr) {
-    return Read<u8>(impl->current_page_table, addr);
+    return Read<u8>(GetEffectivePageTable(), addr);
 }
 
 u8 MemorySystem::Read8(const Kernel::Process& process, VAddr addr) {
@@ -1052,7 +1080,7 @@ u8 MemorySystem::Read8(const Kernel::Process& process, VAddr addr) {
 }
 
 u16 MemorySystem::Read16(const VAddr addr) {
-    return Read<u16_le>(impl->current_page_table, addr);
+    return Read<u16_le>(GetEffectivePageTable(), addr);
 }
 
 u16 MemorySystem::Read16(const Kernel::Process& process, VAddr addr) {
@@ -1060,7 +1088,7 @@ u16 MemorySystem::Read16(const Kernel::Process& process, VAddr addr) {
 }
 
 u32 MemorySystem::Read32(const VAddr addr) {
-    return Read<u32_le>(impl->current_page_table, addr);
+    return Read<u32_le>(GetEffectivePageTable(), addr);
 }
 
 u32 MemorySystem::Read32(const Kernel::Process& process, VAddr addr) {
@@ -1068,7 +1096,7 @@ u32 MemorySystem::Read32(const Kernel::Process& process, VAddr addr) {
 }
 
 u64 MemorySystem::Read64(const VAddr addr) {
-    return Read<u64_le>(impl->current_page_table, addr);
+    return Read<u64_le>(GetEffectivePageTable(), addr);
 }
 
 u64 MemorySystem::Read64(const Kernel::Process& process, VAddr addr) {
@@ -1076,7 +1104,7 @@ u64 MemorySystem::Read64(const Kernel::Process& process, VAddr addr) {
 }
 
 std::optional<u32> MemorySystem::Read32OrNullopt(VAddr addr) {
-    return Read<std::optional<u32_le>>(impl->current_page_table, addr);
+    return Read<std::optional<u32_le>>(GetEffectivePageTable(), addr);
 }
 
 std::optional<u32> MemorySystem::Read32OrNullopt(const Kernel::Process& process, VAddr addr) {
@@ -1094,7 +1122,7 @@ void MemorySystem::ReadBlock(VAddr src_addr, void* dest_buffer, std::size_t size
 }
 
 void MemorySystem::Write8(const VAddr addr, const u8 data) {
-    Write<u8>(impl->current_page_table, addr, data);
+    Write<u8>(GetEffectivePageTable(), addr, data);
 }
 
 void MemorySystem::Write8(const Kernel::Process& process, const VAddr addr, const u8 data) {
@@ -1102,7 +1130,7 @@ void MemorySystem::Write8(const Kernel::Process& process, const VAddr addr, cons
 }
 
 void MemorySystem::Write16(const VAddr addr, const u16 data) {
-    Write<u16_le>(impl->current_page_table, addr, data);
+    Write<u16_le>(GetEffectivePageTable(), addr, data);
 }
 
 void MemorySystem::Write16(const Kernel::Process& process, const VAddr addr, const u16 data) {
@@ -1110,7 +1138,7 @@ void MemorySystem::Write16(const Kernel::Process& process, const VAddr addr, con
 }
 
 void MemorySystem::Write32(const VAddr addr, const u32 data) {
-    Write<u32_le>(impl->current_page_table, addr, data);
+    Write<u32_le>(GetEffectivePageTable(), addr, data);
 }
 
 void MemorySystem::Write32(const Kernel::Process& process, const VAddr addr, const u32 data) {
@@ -1118,7 +1146,7 @@ void MemorySystem::Write32(const Kernel::Process& process, const VAddr addr, con
 }
 
 void MemorySystem::Write64(const VAddr addr, const u64 data) {
-    Write<u64_le>(impl->current_page_table, addr, data);
+    Write<u64_le>(GetEffectivePageTable(), addr, data);
 }
 
 void MemorySystem::Write64(const Kernel::Process& process, const VAddr addr, const u64 data) {

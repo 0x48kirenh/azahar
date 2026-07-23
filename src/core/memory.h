@@ -13,6 +13,10 @@
 #include "common/memory_ref.h"
 #include "common/swap.h"
 
+namespace Memory {
+class PageLock;
+}
+
 namespace Kernel {
 class Process;
 }
@@ -704,6 +708,12 @@ public:
     void RegisterWatchpoint(const Kernel::Process& process, VAddr addr, u32 size);
 
     void UnregisterWatchpoint(const Kernel::Process& process, VAddr addr, u32 size);
+
+    PageLock& GetPageLock();
+
+    static void SetTlsPageTable(std::shared_ptr<PageTable> page_table);
+
+    static std::shared_ptr<PageTable> GetTlsPageTable();
 
 private:
     template <typename T>

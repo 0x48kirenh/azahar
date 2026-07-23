@@ -100,6 +100,34 @@ private:
     std::size_t generation = 0; // Incremented once each time the barrier is used
 };
 
+class SpinBarrier {
+public:
+    explicit SpinBarrier(std::size_t count_) : total(count_) {}
+
+    bool Sync(std::stop_token token = {}) {
+        const std::size_t gen = generation.load(std::memory_order_acquire);
+
+        if (arrived.fetch_add(1, std::memory_order_acq_rel) + 1 == total) {
+            arrived.store(0, std::memory_order_relaxed);
+            generation.store(gen + 1, std::memory_order_release);
+            return true;
+        }
+
+        while (generation.load(std::memory_order_acquire) == gen) {
+            if (token.stop_requested()) [[unlikely]] {
+                return false;
+            }
+            __builtin_ia32_pause();
+        }
+        return true;
+    }
+
+private:
+    std::size_t total;
+    std::atomic<std::size_t> arrived{0};
+    std::atomic<std::size_t> generation{0};
+};
+
 enum class ThreadPriority : u32 {
     Low = 0,
     Normal = 1,

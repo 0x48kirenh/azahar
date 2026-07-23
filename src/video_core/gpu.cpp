@@ -12,6 +12,7 @@
 #include "core/loader/loader.h"
 #include "video_core/debug_utils/debug_utils.h"
 #include "video_core/gpu.h"
+#include "video_core/gpu_command_thread.h"
 #include "video_core/gpu_debugger.h"
 #include "video_core/gpu_impl.h"
 #include "video_core/pica/pica_core.h"
@@ -95,11 +96,27 @@ GPU::GPU(Core::System& system, Frontend::EmuWindow& emu_window,
         [this](uintptr_t user_data, s64 cycles_late) { VBlankCallback(user_data, cycles_late); });
     impl->timing.ScheduleEvent(FRAME_TICKS, impl->vblank_event);
 
+    gpu_command_thread = std::make_unique<GpuCommandThread>(system);
+    StartGpuThread();
+
     // Bind the rasterizer to the PICA GPU
     impl->pica.BindRasterizer(impl->rasterizer);
 }
 
-GPU::~GPU() = default;
+GPU::~GPU() {
+    StopGpuThread();
+}
+
+namespace {
+
+void SubmitAndWait(VideoCore::GpuCommandThread& thread, GpuCommand cmd) {
+    std::atomic_int done{0};
+    cmd.completion_flag = &done;
+    thread.SubmitCommand(cmd);
+    done.wait(0, std::memory_order_acquire);
+}
+
+} // namespace
 
 PAddr GPU::VirtualToPhysicalAddress(VAddr addr) {
     if (addr == 0) {
@@ -143,124 +160,13 @@ void GPU::ClearAll(bool flush) {
 }
 
 void GPU::Execute(const Service::GSP::Command& command) {
-    using Service::GSP::CommandId;
-    auto& regs = impl->pica.regs;
-
-    switch (command.id) {
-    case CommandId::RequestDma: {
-        impl->system.Memory().RasterizerFlushVirtualRegion(
-            command.dma_request.source_address, command.dma_request.size, Memory::FlushMode::Flush);
-        impl->system.Memory().RasterizerFlushVirtualRegion(command.dma_request.dest_address,
-                                                           command.dma_request.size,
-                                                           Memory::FlushMode::Invalidate);
-
-        // TODO(Subv): These memory accesses should not go through the application's memory mapping.
-        // They should go through the GSP module's memory mapping.
-        const auto process = impl->system.Kernel().GetCurrentProcess();
-        impl->memory.CopyBlock(*process, command.dma_request.dest_address,
-                               command.dma_request.source_address, command.dma_request.size);
-
-        auto is_vram = [&](u32 addr) {
-            return addr >= Memory::VRAM_VADDR && addr <= Memory::VRAM_VADDR_END;
-        };
-
-        u64 delay = DelayGenerator::CalculateDelayNanoseconds(
-            DelayGenerator::GetCopyMode(is_vram(command.dma_request.source_address),
-                                        is_vram(command.dma_request.dest_address)),
-            false, command.dma_request.size);
-
-        impl->signal_interrupt(Service::GSP::InterruptId::DMA, delay);
-        break;
-    }
-    case CommandId::SubmitCmdList: {
-        auto& params = command.submit_gpu_cmdlist;
-        auto& cmdbuffer = regs.internal.pipeline.command_buffer;
-
-        // Write to the command buffer GPU registers
-        cmdbuffer.addr[0].Assign(VirtualToPhysicalAddress(params.address) >> 3);
-        cmdbuffer.size[0].Assign(params.size >> 3);
-        cmdbuffer.trigger[0] = 1;
-
-        // Trigger processing of the command list
-        SubmitCmdList(0);
-        break;
-    }
-    case CommandId::MemoryFill: {
-        auto& params = command.memory_fill;
-        auto& memfill = regs.memory_fill_config;
-
-        // Write to the memory fill GPU registers.
-        // If both buffers are set GSP dispatches PSC0 only.
-        const bool has_both_bufs = params.start1 != 0 && params.start2 != 0;
-        if (params.start1 != 0) {
-            memfill[0].address_start = VirtualToPhysicalAddress(params.start1) >> 3;
-            memfill[0].address_end = VirtualToPhysicalAddress(params.end1) >> 3;
-            memfill[0].value_32bit = params.value1;
-            memfill[0].control = params.control1;
-            MemoryFill(0, has_both_bufs ? std::numeric_limits<u32>::max() : 0);
-        }
-        if (params.start2 != 0) {
-            memfill[1].address_start = VirtualToPhysicalAddress(params.start2) >> 3;
-            memfill[1].address_end = VirtualToPhysicalAddress(params.end2) >> 3;
-            memfill[1].value_32bit = params.value2;
-            memfill[1].control = params.control2;
-            MemoryFill(1, has_both_bufs ? 0 : 1);
-        }
-        break;
-    }
-    case CommandId::DisplayTransfer: {
-        auto& params = command.display_transfer;
-        auto& display_transfer = regs.display_transfer_config;
-
-        // Write to the transfer engine GPU registers.
-        display_transfer.input_address = VirtualToPhysicalAddress(params.in_buffer_address) >> 3;
-        display_transfer.output_address = VirtualToPhysicalAddress(params.out_buffer_address) >> 3;
-        display_transfer.input_size = params.in_buffer_size;
-        display_transfer.output_size = params.out_buffer_size;
-        display_transfer.flags = params.flags;
-        display_transfer.trigger.Assign(1);
-
-        // Trigger the display transfer.
-        MemoryTransfer();
-        break;
-    }
-    case CommandId::TextureCopy: {
-        auto& params = command.texture_copy;
-        auto& texture_copy = regs.display_transfer_config;
-
-        // Write to the transfer engine GPU registers.
-        texture_copy.input_address = VirtualToPhysicalAddress(params.in_buffer_address) >> 3;
-        texture_copy.output_address = VirtualToPhysicalAddress(params.out_buffer_address) >> 3;
-        texture_copy.texture_copy.size = params.size;
-        texture_copy.texture_copy.input_size = params.in_width_gap;
-        texture_copy.texture_copy.output_size = params.out_width_gap;
-        texture_copy.flags = params.flags;
-        texture_copy.trigger.Assign(1);
-
-        // Trigger the texture copy.
-        MemoryTransfer();
-        break;
-    }
-    case CommandId::CacheFlush: {
-        // Rasterizer flushing handled elsewhere in CPU read/write and other GPU handlers
-        // Use command.cache_flush.regions to implement this handler
-        break;
-    }
-    default:
-        LOG_ERROR(HW_GPU, "Unknown command {:#08X}", command.id.Value());
-    }
-
-    // Notify debugger that a GSP command was processed.
-    if (impl->debug_context) {
-        impl->debug_context->OnEvent(Pica::DebugContext::Event::GSPCommandProcessed, &command);
-    }
+    ExecuteSync(command);
 }
 
 void GPU::SetBufferSwap(u32 screen_id, const Service::GSP::FrameBufferInfo& info) {
     const PAddr phys_address_left = VirtualToPhysicalAddress(info.address_left);
     const PAddr phys_address_right = VirtualToPhysicalAddress(info.address_right);
 
-    // Update framebuffer properties.
     auto& framebuffer = impl->pica.regs.framebuffer_config[screen_id];
     if (info.active_fb == 0) {
         framebuffer.address_left1 = phys_address_left;
@@ -274,7 +180,6 @@ void GPU::SetBufferSwap(u32 screen_id, const Service::GSP::FrameBufferInfo& info
     framebuffer.format = info.format;
     framebuffer.active_fb = info.shown_fb;
 
-    // Notify debugger about the buffer swap.
     if (impl->debug_context) {
         impl->debug_context->OnEvent(Pica::DebugContext::Event::BufferSwapped, nullptr);
     }
@@ -334,21 +239,26 @@ void GPU::WriteReg(VAddr addr, u32 data) {
 
         // Handle registers that trigger GPU actions
         switch (index) {
-        case GPU_REG_INDEX(memory_fill_config[0].trigger):
-            MemoryFill(0, 0);
+        case GPU_REG_INDEX(memory_fill_config[0].trigger): {
+            MemoryFillSync(0, 0);
             break;
-        case GPU_REG_INDEX(memory_fill_config[1].trigger):
-            MemoryFill(1, 1);
+        }
+        case GPU_REG_INDEX(memory_fill_config[1].trigger): {
+            MemoryFillSync(1, 1);
             break;
-        case GPU_REG_INDEX(display_transfer_config.trigger):
-            MemoryTransfer();
+        }
+        case GPU_REG_INDEX(display_transfer_config.trigger): {
+            MemoryTransferSync();
             break;
-        case GPU_REG_INDEX(internal.pipeline.command_buffer.trigger[0]):
-            SubmitCmdList(0);
+        }
+        case GPU_REG_INDEX(internal.pipeline.command_buffer.trigger[0]): {
+            SubmitCmdListSync(0);
             break;
-        case GPU_REG_INDEX(internal.pipeline.command_buffer.trigger[1]):
-            SubmitCmdList(1);
+        }
+        case GPU_REG_INDEX(internal.pipeline.command_buffer.trigger[1]): {
+            SubmitCmdListSync(1);
             break;
+        }
         default:
             break;
         }
@@ -486,15 +396,133 @@ void GPU::MemoryTransfer() {
 }
 
 void GPU::VBlankCallback(std::uintptr_t user_data, s64 cycles_late) {
-    // Signal to GSP that GPU interrupt has occurred
     impl->signal_interrupt(Service::GSP::InterruptId::PDC0, 0);
     impl->signal_interrupt(Service::GSP::InterruptId::PDC1, 0);
 
-    // Present renderered frame.
-    impl->renderer->SwapBuffers();
+    impl->frame_ready.store(true, std::memory_order_release);
 
-    // Reschedule recurrent event
     impl->timing.ScheduleEvent(FRAME_TICKS - cycles_late, impl->vblank_event);
+}
+
+bool GPU::IsFrameReady() const {
+    return impl->frame_ready.load(std::memory_order_acquire);
+}
+
+void GPU::ClearFrameReady() {
+    impl->frame_ready.store(false, std::memory_order_release);
+}
+
+void GPU::StartGpuThread() {
+    if (gpu_command_thread) {
+        gpu_command_thread->Start();
+    }
+}
+
+void GPU::StopGpuThread() {
+    if (gpu_command_thread) {
+        gpu_command_thread->Stop();
+    }
+}
+
+void GPU::ExecuteSync(const Service::GSP::Command& command) {
+    using Service::GSP::CommandId;
+    auto& regs = impl->pica.regs;
+
+    switch (command.id) {
+    case CommandId::RequestDma: {
+        impl->system.Memory().RasterizerFlushVirtualRegion(
+            command.dma_request.source_address, command.dma_request.size, Memory::FlushMode::Flush);
+        impl->system.Memory().RasterizerFlushVirtualRegion(command.dma_request.dest_address,
+                                                           command.dma_request.size,
+                                                           Memory::FlushMode::Invalidate);
+        const auto process = impl->system.Kernel().GetCurrentProcess();
+        impl->memory.CopyBlock(*process, command.dma_request.dest_address,
+                               command.dma_request.source_address, command.dma_request.size);
+        auto is_vram = [&](u32 addr) {
+            return addr >= Memory::VRAM_VADDR && addr <= Memory::VRAM_VADDR_END;
+        };
+        u64 delay = DelayGenerator::CalculateDelayNanoseconds(
+            DelayGenerator::GetCopyMode(is_vram(command.dma_request.source_address),
+                                         is_vram(command.dma_request.dest_address)),
+            false, command.dma_request.size);
+        impl->signal_interrupt(Service::GSP::InterruptId::DMA, delay);
+        break;
+    }
+    case CommandId::SubmitCmdList: {
+        auto& params = command.submit_gpu_cmdlist;
+        auto& cmdbuffer = regs.internal.pipeline.command_buffer;
+        cmdbuffer.addr[0].Assign(VirtualToPhysicalAddress(params.address) >> 3);
+        cmdbuffer.size[0].Assign(params.size >> 3);
+        cmdbuffer.trigger[0] = 1;
+        SubmitCmdList(0);
+        break;
+    }
+    case CommandId::MemoryFill: {
+        auto& params = command.memory_fill;
+        auto& memfill = regs.memory_fill_config;
+        const bool has_both_bufs = params.start1 != 0 && params.start2 != 0;
+        if (params.start1 != 0) {
+            memfill[0].address_start = VirtualToPhysicalAddress(params.start1) >> 3;
+            memfill[0].address_end = VirtualToPhysicalAddress(params.end1) >> 3;
+            memfill[0].value_32bit = params.value1;
+            memfill[0].control = params.control1;
+            MemoryFill(0, has_both_bufs ? std::numeric_limits<u32>::max() : 0);
+        }
+        if (params.start2 != 0) {
+            memfill[1].address_start = VirtualToPhysicalAddress(params.start2) >> 3;
+            memfill[1].address_end = VirtualToPhysicalAddress(params.end2) >> 3;
+            memfill[1].value_32bit = params.value2;
+            memfill[1].control = params.control2;
+            MemoryFill(1, has_both_bufs ? 0 : 1);
+        }
+        break;
+    }
+    case CommandId::DisplayTransfer: {
+        auto& params = command.display_transfer;
+        auto& display_transfer = regs.display_transfer_config;
+        display_transfer.input_address = VirtualToPhysicalAddress(params.in_buffer_address) >> 3;
+        display_transfer.output_address = VirtualToPhysicalAddress(params.out_buffer_address) >> 3;
+        display_transfer.input_size = params.in_buffer_size;
+        display_transfer.output_size = params.out_buffer_size;
+        display_transfer.flags = params.flags;
+        display_transfer.trigger.Assign(1);
+        MemoryTransfer();
+        break;
+    }
+    case CommandId::TextureCopy: {
+        auto& params = command.texture_copy;
+        auto& texture_copy = regs.display_transfer_config;
+        texture_copy.input_address = VirtualToPhysicalAddress(params.in_buffer_address) >> 3;
+        texture_copy.output_address = VirtualToPhysicalAddress(params.out_buffer_address) >> 3;
+        texture_copy.texture_copy.size = params.size;
+        texture_copy.texture_copy.input_size = params.in_width_gap;
+        texture_copy.texture_copy.output_size = params.out_width_gap;
+        texture_copy.flags = params.flags;
+        texture_copy.trigger.Assign(1);
+        MemoryTransfer();
+        break;
+    }
+    case CommandId::CacheFlush:
+        break;
+    default:
+        LOG_ERROR(HW_GPU, "Unknown command {:#08X}", command.id.Value());
+    }
+
+    if (impl->debug_context) {
+        impl->debug_context->OnEvent(Pica::DebugContext::Event::GSPCommandProcessed, &command);
+    }
+}
+
+void GPU::MemoryFillSync(u32 index, u32 intr_index) {
+    MemoryFill(index, intr_index);
+}
+
+void GPU::MemoryTransferSync() {
+    MemoryTransfer();
+}
+
+void GPU::SubmitCmdListSync(u32 index) {
+    SubmitCmdList(index);
 }
 
 void GPU::RecreateRenderer(Frontend::EmuWindow& emu_window, Frontend::EmuWindow* secondary_window) {

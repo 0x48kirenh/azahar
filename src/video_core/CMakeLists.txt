@@ -11,6 +11,8 @@ add_library(video_core STATIC EXCLUDE_FROM_ALL
     debug_utils/debug_utils.h
     gpu.cpp
     gpu.h
+    gpu_command_thread.cpp
+    gpu_command_thread.h
     gpu_debugger.h
     gpu_impl.h
     pica_types.h

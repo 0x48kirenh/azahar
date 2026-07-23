@@ -3,6 +3,7 @@
 // Refer to the license.txt file included.
 
 #include <algorithm>
+#include <shared_mutex>
 #include <array>
 #include <chrono>
 #include <fmt/format.h>
@@ -645,6 +646,7 @@ Result SVC::ConnectToPort(Handle* out_handle, VAddr port_name_address) {
 
     LOG_TRACE(Kernel_SVC, "called port_name={}", port_name);
 
+    std::shared_lock lock{kernel.named_ports_mutex};
     auto it = kernel.named_ports.find(port_name);
     R_UNLESS(it != kernel.named_ports.end(), ResultNotFound);
 
@@ -1332,7 +1334,7 @@ Result SVC::CreateThread(Handle* out_handle, u32 entry_point, u32 arg, VAddr sta
 
 /// Called when a thread exits
 void SVC::ExitThread() {
-    LOG_TRACE(Kernel_SVC, "called, pc=0x{:08X}", system.GetRunningCore().GetPC());
+    LOG_TRACE(Kernel_SVC, "called, pc=0x{:08X}", kernel.GetRunningCPU()->GetPC());
 
     kernel.GetCurrentThreadManager().ExitCurrentThread();
     system.PrepareReschedule();
@@ -1385,7 +1387,7 @@ Result SVC::CreateMutex(Handle* out_handle, u32 initial_locked) {
 
     // Create mutex.
     const auto mutex = kernel.CreateMutex(initial_locked != 0);
-    mutex->name = fmt::format("mutex-{:08x}", system.GetRunningCore().GetReg(14));
+    mutex->name = fmt::format("mutex-{:08x}", kernel.GetRunningCPU()->GetReg(14));
     mutex->resource_limit = resource_limit;
     return current_process->handle_table.Create(out_handle, std::move(mutex));
 }
@@ -1452,7 +1454,7 @@ Result SVC::CreateSemaphore(Handle* out_handle, s32 initial_count, s32 max_count
     // Create semaphore
     CASCADE_RESULT(std::shared_ptr<Semaphore> semaphore,
                    kernel.CreateSemaphore(initial_count, max_count));
-    semaphore->name = fmt::format("semaphore-{:08x}", system.GetRunningCore().GetReg(14));
+    semaphore->name = fmt::format("semaphore-{:08x}", kernel.GetRunningCPU()->GetReg(14));
     semaphore->resource_limit = resource_limit;
     return current_process->handle_table.Create(out_handle, std::move(semaphore));
 }
@@ -1548,7 +1550,7 @@ Result SVC::CreateEvent(Handle* out_handle, u32 reset_type) {
     }
 
     // Create event.
-    const auto name = fmt::format("event-{:08x}", system.GetRunningCore().GetReg(14));
+    const auto name = fmt::format("event-{:08x}", kernel.GetRunningCPU()->GetReg(14));
     const auto event = kernel.CreateEvent(static_cast<ResetType>(reset_type), name);
     event->resource_limit = resource_limit;
     return current_process->handle_table.Create(out_handle, std::move(event));
@@ -1592,7 +1594,7 @@ Result SVC::CreateTimer(Handle* out_handle, u32 reset_type) {
     }
 
     // Create timer.
-    const auto name = fmt::format("timer-{:08x}", system.GetRunningCore().GetReg(14));
+    const auto name = fmt::format("timer-{:08x}", kernel.GetRunningCPU()->GetReg(14));
     const auto timer = kernel.CreateTimer(static_cast<ResetType>(reset_type), name);
     timer->resource_limit = resource_limit;
     return current_process->handle_table.Create(out_handle, std::move(timer));
@@ -1658,7 +1660,7 @@ void SVC::SleepThread(s64 nanoseconds) {
 /// This returns the total CPU ticks elapsed since the CPU was powered-on
 s64 SVC::GetSystemTick() {
     // TODO: Use globalTicks here?
-    return system.GetRunningCore().GetTimer().GetTicks();
+    return kernel.GetRunningCPU()->GetTimer().GetTicks();
 }
 
 // Returns information of the specified handle
@@ -2437,11 +2439,15 @@ void SVC::CallSVC(u32 immediate) {
     DEBUG_ASSERT_MSG(kernel.GetCurrentProcess()->status == ProcessStatus::Running,
                      "Running threads from exiting processes is unimplemented");
 
+    ASSERT_MSG(kernel.GetCurrentThreadManager().GetCurrentThread() != nullptr,
+               "SVC 0x{:02X} called from unmapped host thread (core {})",
+               immediate, kernel.GetRunningCPU()->GetID());
+
     const FunctionDef* info = GetSVCInfo(immediate);
     LOG_TRACE(Kernel_SVC, "calling {}", info->name);
     if (info) {
         if (info->func) {
-            system.GetRunningCore().GetTimer().AddTicks(info->cycles);
+            kernel.GetRunningCPU()->GetTimer().AddTicks(info->cycles);
             (this->*(info->func))();
         } else {
             LOG_ERROR(Kernel_SVC, "unimplemented SVC function {:02X} {}(..)", info->id, info->name);
@@ -2453,11 +2459,11 @@ void SVC::CallSVC(u32 immediate) {
 SVC::SVC(Core::System& system) : system(system), kernel(system.Kernel()), memory(system.Memory()) {}
 
 u32 SVC::GetReg(std::size_t n) {
-    return system.GetRunningCore().GetReg(static_cast<int>(n));
+    return kernel.GetRunningCPU()->GetReg(static_cast<int>(n));
 }
 
 void SVC::SetReg(std::size_t n, u32 value) {
-    system.GetRunningCore().SetReg(static_cast<int>(n), value);
+    kernel.GetRunningCPU()->SetReg(static_cast<int>(n), value);
 }
 
 SVCContext::SVCContext(Core::System& system) : impl(std::make_unique<SVC>(system)) {}

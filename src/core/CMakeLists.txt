@@ -36,6 +36,15 @@ add_library(citra_core STATIC EXCLUDE_FROM_ALL
     core.h
     core_timing.cpp
     core_timing.h
+    cpu_thread_pool.cpp
+    cpu_thread_pool.h
+    cross_core_svc.h
+    emulation_orchestrator.cpp
+    emulation_orchestrator.h
+    interrupt_controller.cpp
+    interrupt_controller.h
+    jit_cache_coherence.h
+    memory_page_lock.h
     dumping/backend.cpp
     dumping/backend.h
     dumping/ffmpeg_backend.cpp

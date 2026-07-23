@@ -4,6 +4,7 @@
 
 #include "common/settings.h"
 #include "core/core.h"
+#include "core/core_timing.h"
 #include "core/frontend/emu_window.h"
 #include "core/tracer/recorder.h"
 #include "video_core/debug_utils/debug_utils.h"
@@ -47,7 +48,9 @@ void RendererBase::EndFrame() {
 
     render_window.PollEvents();
 
-    system.frame_limiter.DoFrameLimiting(system.CoreTiming().GetGlobalTimeUs());
+    system.frame_limiter.DoFrameLimiting(
+        std::chrono::microseconds{system.CoreTiming().GetTimer(0)->GetTicks() * 1000000 /
+                                  BASE_CLOCK_RATE_ARM11});
     system.perf_stats->BeginSystemFrame();
 }
 
