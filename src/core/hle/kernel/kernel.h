@@ -412,6 +412,10 @@ public:
 
     void ClearCurrentProcessTLS();
 
+    /// Break shared_ptr cycles: clear handle tables and thread wakeup callbacks
+    /// BEFORE clearing process_list, so ~Process() doesn't need to run.
+    void ShutdownProcesses();
+
     void ReportAsyncState(bool state) {
         if (state) {
             pending_async_operations++;
@@ -467,6 +471,14 @@ private:
     std::vector<bool> reschedule_pending;
 
     std::vector<std::unique_ptr<ThreadManager>> thread_managers;
+
+public:
+    // Set to true during ~KernelSystem(). When set, ~Process() skips all cleanup
+    // (handle_table.Clear, FreeAllMemory, UnregisterPageTable) because the kernel
+    // and its subsystems are being torn down — there's nothing left to clean up.
+    bool is_being_destroyed = false;
+
+private:
 
     std::shared_ptr<ConfigMem::Handler> config_mem_handler;
     std::shared_ptr<SharedPage::Handler> shared_page_handler;

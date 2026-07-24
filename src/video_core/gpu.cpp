@@ -148,14 +148,17 @@ void GPU::SetInterruptHandler(Service::GSP::InterruptHandler handler) {
 }
 
 void GPU::FlushRegion(PAddr addr, u32 size) {
+    std::scoped_lock lock{impl->reg_mutex};
     impl->rasterizer->FlushRegion(addr, size);
 }
 
 void GPU::InvalidateRegion(PAddr addr, u32 size) {
+    std::scoped_lock lock{impl->reg_mutex};
     impl->rasterizer->InvalidateRegion(addr, size);
 }
 
 void GPU::ClearAll(bool flush) {
+    std::scoped_lock lock{impl->reg_mutex};
     impl->rasterizer->ClearAll(flush);
 }
 
@@ -164,6 +167,7 @@ void GPU::Execute(const Service::GSP::Command& command) {
 }
 
 void GPU::SetBufferSwap(u32 screen_id, const Service::GSP::FrameBufferInfo& info) {
+    std::scoped_lock lock{impl->reg_mutex};
     const PAddr phys_address_left = VirtualToPhysicalAddress(info.address_left);
     const PAddr phys_address_right = VirtualToPhysicalAddress(info.address_right);
 
@@ -192,11 +196,13 @@ void GPU::SetBufferSwap(u32 screen_id, const Service::GSP::FrameBufferInfo& info
 }
 
 void GPU::SetColorFill(const Pica::ColorFill& fill) {
+    std::scoped_lock lock{impl->reg_mutex};
     impl->pica.regs_lcd.color_fill_top = fill;
     impl->pica.regs_lcd.color_fill_bottom = fill;
 }
 
 u32 GPU::ReadReg(VAddr addr) {
+    std::scoped_lock lock{impl->reg_mutex};
     switch (addr & 0xFFFFF000) {
     case VADDR_LCD: {
         const u32 offset = addr - VADDR_LCD;
@@ -219,6 +225,7 @@ u32 GPU::ReadReg(VAddr addr) {
 }
 
 void GPU::WriteReg(VAddr addr, u32 data) {
+    std::scoped_lock lock{impl->reg_mutex};
     switch (addr & 0xFFFFF000) {
     case VADDR_LCD: {
         const u32 offset = addr - VADDR_LCD;
@@ -395,6 +402,11 @@ void GPU::MemoryTransfer() {
     impl->signal_interrupt(Service::GSP::InterruptId::PPF, delay);
 }
 
+void GPU::SwapBuffers() {
+    std::scoped_lock lock{impl->reg_mutex};
+    impl->renderer->SwapBuffers();
+}
+
 void GPU::VBlankCallback(std::uintptr_t user_data, s64 cycles_late) {
     impl->signal_interrupt(Service::GSP::InterruptId::PDC0, 0);
     impl->signal_interrupt(Service::GSP::InterruptId::PDC1, 0);
@@ -425,6 +437,7 @@ void GPU::StopGpuThread() {
 }
 
 void GPU::ExecuteSync(const Service::GSP::Command& command) {
+    std::scoped_lock lock{impl->reg_mutex};
     using Service::GSP::CommandId;
     auto& regs = impl->pica.regs;
 
@@ -514,14 +527,17 @@ void GPU::ExecuteSync(const Service::GSP::Command& command) {
 }
 
 void GPU::MemoryFillSync(u32 index, u32 intr_index) {
+    std::scoped_lock lock{impl->reg_mutex};
     MemoryFill(index, intr_index);
 }
 
 void GPU::MemoryTransferSync() {
+    std::scoped_lock lock{impl->reg_mutex};
     MemoryTransfer();
 }
 
 void GPU::SubmitCmdListSync(u32 index) {
+    std::scoped_lock lock{impl->reg_mutex};
     SubmitCmdList(index);
 }
 

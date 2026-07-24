@@ -39,7 +39,7 @@ struct GPU::Impl {
     Core::TimingEventType* vblank_event;
     Service::GSP::InterruptHandler signal_interrupt;
     std::atomic_bool frame_ready{false};
-    std::mutex reg_mutex;
+    std::recursive_mutex reg_mutex;
 
     explicit Impl(Core::System& system, Frontend::EmuWindow& emu_window,
                   Frontend::EmuWindow* secondary_window)

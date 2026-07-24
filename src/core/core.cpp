@@ -715,10 +715,10 @@ void System::Shutdown(bool is_deserializing) {
     emulation_orchestrator.reset();
     gpu.reset();
 
-    if (kernel) {
-        kernel->ClearStoredProcesses();
-        kernel->ClearCurrentProcessTLS();
-    }
+    // Reset services and external subsystems BEFORE kernel cleanup.
+    // Services (especially AppletManager) hold shared_ptr<Object> that can
+    // reference Processes. These must be released while the kernel is still
+    // alive so that ~Process() can safely access kernel.memory etc.
     if (!is_deserializing) {
         lle_modules.clear();
 #ifdef ENABLE_GDBSTUB
@@ -734,6 +734,14 @@ void System::Shutdown(bool is_deserializing) {
     archive_manager.reset();
     service_manager.reset();
     dsp_core.reset();
+
+    // Now that all external references are gone, clear kernel TLS and stored processes.
+    // The kernel destructor (kernel.reset() below) will handle full teardown safely.
+    if (kernel) {
+        kernel->ClearStoredProcesses();
+        kernel->ClearCurrentProcessTLS();
+    }
+
     kernel.reset();
     cross_core_svc.reset();
     interrupt_controller.reset();

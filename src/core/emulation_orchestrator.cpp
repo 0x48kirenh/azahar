@@ -11,7 +11,6 @@
 #include "core/loader/loader.h"
 #include "core/perf_stats.h"
 #include "video_core/gpu.h"
-#include "video_core/renderer_base.h"
 
 namespace Core {
 
@@ -135,7 +134,7 @@ System::ResultStatus EmulationOrchestrator::RunFrame() {
     }
 
     system.GPU().ClearFrameReady();
-    system.GPU().Renderer().SwapBuffers();
+    system.GPU().SwapBuffers();
 
     return system.status;
 }

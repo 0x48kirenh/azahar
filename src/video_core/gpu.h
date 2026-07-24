@@ -109,6 +109,10 @@ public:
 
     void ClearFrameReady();
 
+    /// Presents the rendered frame. Must be called from the main thread.
+    /// Acquires reg_mutex to prevent races with worker GPU operations.
+    void SwapBuffers();
+
     void ExecuteSync(const Service::GSP::Command& command);
 
     void MemoryFillSync(u32 index, u32 intr_index);

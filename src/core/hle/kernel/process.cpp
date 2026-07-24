@@ -691,6 +691,14 @@ Kernel::Process::Process(KernelSystem& kernel)
 Kernel::Process::~Process() {
     LOG_INFO(Kernel, "Cleaning up process {}", process_id);
 
+    // If the kernel is being destroyed, skip all cleanup — the kernel's
+    // subsystems (memory, timing, etc.) are being torn down and accessing
+    // them is unsafe. Everything will be freed when the kernel object is
+    // fully destroyed.
+    if (kernel.is_being_destroyed) {
+        return;
+    }
+
     // Release all objects this process owns first so that their potential destructor can do clean
     // up with this process before further destruction.
     // TODO(wwylele): explicitly destroy or invalidate objects this process owns (threads, shared

@@ -52,6 +52,7 @@ KernelSystem::KernelSystem(Memory::MemorySystem& memory, Core::Timing& timing,
 
 /// Shutdown the kernel
 KernelSystem::~KernelSystem() {
+    is_being_destroyed = true;
     ResetThreadIDs();
 };
 
@@ -92,6 +93,22 @@ void KernelSystem::SetCurrentProcessForCPU(std::shared_ptr<Process> process, u32
 void KernelSystem::ClearCurrentProcessTLS() {
     tls_current_process = nullptr;
     tls_current_cpu = nullptr;
+}
+
+void KernelSystem::ShutdownProcesses() {
+    for (auto& proc : process_list) {
+        if (proc) {
+            proc->handle_table.Clear();
+        }
+    }
+    for (auto& tm : thread_managers) {
+        if (tm) {
+            tm->current_thread = nullptr;
+            tm->thread_list.clear();
+        }
+    }
+    process_list.clear();
+    current_process = nullptr;
 }
 
 void KernelSystem::SetCurrentMemoryPageTable(std::shared_ptr<Memory::PageTable> page_table) {

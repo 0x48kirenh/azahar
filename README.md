@@ -16,6 +16,11 @@ This project exists to explore whether a multithreaded emulation architecture ca
 - **SpinBarrier synchronization**: Custom spin-wait barriers minimize sync overhead between slices
 - **Pipelined rendering**: SwapBuffers from the previous frame overlaps with CPU execution of the next frame
 - **VBlank-driven frame loop**: The orchestrator runs CPU slices until VBlank fires, then presents
+- **GPU mutex**: All GPU/rasterizer access is serialized via `reg_mutex` to prevent surface-cache races between worker threads and the main thread
+
+## TODO
+
+- [ ] **Pause all cores before kernel nuke**: Currently `~Process()` is guarded by `is_being_destroyed` to survive kernel teardown, but the proper fix is to pause all worker threads (via barrier) before destroying the kernel. This ensures no worker is mid-slice when the kernel is reset, eliminating the last class of race conditions during game restart.
 
 ## Lineage
 
